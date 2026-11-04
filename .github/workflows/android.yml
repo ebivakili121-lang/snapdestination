@@ -3,7 +3,8 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
 
 jobs:
   build:
@@ -20,11 +21,11 @@ jobs:
         with:
           gradle-version: '8.9'
 
-       - name: Build APK
+      - name: Build APK
         working-directory: snapdestination
         run: gradle assembleDebug
 
       - uses: actions/upload-artifact@v4
-        with: 
-        name: SnapDestination-APK
-        path: app/build/outputs/apk/debug/*.apk
+        with:
+          name: SnapDestination-APK
+          path: snapdestination/app/build/outputs/apk/debug/*.apk
