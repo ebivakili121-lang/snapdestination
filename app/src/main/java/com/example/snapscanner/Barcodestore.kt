@@ -7,88 +7,102 @@ import android.database.sqlite.SQLiteOpenHelper
 
 object BarcodeStore {
 
-    private lateinit var helper: DatabaseHelper
+    private lateinit var dbHelper: DatabaseHelper
+    private val lock = Any()
 
     fun initialize(context: Context) {
-        if (!::helper.isInitialized) {
-            helper = DatabaseHelper(context.applicationContext)
+        synchronized(lock) {
+            if (!::dbHelper.isInitialized) {
+                dbHelper = DatabaseHelper(context.applicationContext)
+            }
         }
     }
 
-    // تبدیل اعداد فارسی و عربی به انگلیسی
-    fun normalize(barcode: String): String {
-        return barcode
-            .map { char ->
-                when (char) {
-                    in '۰'..'۹' -> ('0'.code + char.code - '۰'.code).toChar()
-                    in '٠'..'٩' -> ('0'.code + char.code - '٠'.code).toChar()
-                    else -> char
+    fun normalize(value: String): String {
+        val result = StringBuilder()
+
+        for (char in value.trim()) {
+            val digit = when (char) {
+                in '۰'..'۹' -> char.code - '۰'.code
+                in '٠'..'٩' -> char.code - '٠'.code
+                else -> -1
+            }
+
+            if (digit >= 0) {
+                result.append(('0'.code + digit).toChar())
+            } else {
+                result.append(char)
+            }
+        }
+
+        return result.toString()
+    }
+
+    fun getDestination(barcode: String): Int? {
+        synchronized(lock) {
+            check(::dbHelper.isInitialized) {
+                "BarcodeStore is not initialized"
+            }
+
+            val code = normalize(barcode)
+            val db = dbHelper.readableDatabase
+
+            db.rawQuery(
+                "SELECT destination FROM barcodes WHERE barcode = ?",
+                arrayOf(code)
+            ).use { cursor ->
+                return if (cursor.moveToFirst()) {
+                    cursor.getInt(0)
+                } else {
+                    null
                 }
             }
-            .joinToString("")
-            .filter { it.isDigit() }
+        }
     }
 
-    // اختصاص شماره مقصد جدید به بارکد
-    @Synchronized
     fun assign(barcode: String): Int {
-        val db = helper.writableDatabase
-        val code = normalize(barcode)
+        synchronized(lock) {
+            check(::dbHelper.isInitialized) {
+                "BarcodeStore is not initialized"
+            }
 
-        if (code.isEmpty()) return -1
+            val code = normalize(barcode)
+            val db = dbHelper.writableDatabase
 
-        val existing = getDestination(code)
-        if (existing != null) return existing
+            db.beginTransaction()
 
-        val nextNumber = getMaxDestination(db) + 1
+            try {
+                db.rawQuery(
+                    "SELECT destination FROM barcodes WHERE barcode = ?",
+                    arrayOf(code)
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val existing = cursor.getInt(0)
+                        db.setTransactionSuccessful()
+                        return existing
+                    }
+                }
 
-        val values = ContentValues().apply {
-            put("barcode", code)
-            put("destination", nextNumber)
-        }
+                val nextDestination = db.rawQuery(
+                    "SELECT COALESCE(MAX(destination), 0) + 1 FROM barcodes",
+                    null
+                ).use { cursor ->
+                    cursor.moveToFirst()
+                    cursor.getInt(0)
+                }
 
-        db.insertWithOnConflict(
-            "barcodes",
-            null,
-            values,
-            SQLiteDatabase.CONFLICT_IGNORE
-        )
+                val values = ContentValues().apply {
+                    put("barcode", code)
+                    put("destination", nextDestination)
+                }
 
-        return getDestination(code) ?: nextNumber
-    }
+                db.insertOrThrow("barcodes", null, values)
+                db.setTransactionSuccessful()
 
-    // پیدا کردن شماره مقصد بارکد
-    @Synchronized
-    fun getDestination(barcode: String): Int? {
-        val code = normalize(barcode)
-        if (code.isEmpty()) return null
+                return nextDestination
 
-        val cursor = helper.readableDatabase.query(
-            "barcodes",
-            arrayOf("destination"),
-            "barcode = ?",
-            arrayOf(code),
-            null,
-            null,
-            null
-        )
-
-        cursor.use {
-            return if (it.moveToFirst()) it.getInt(0) else null
-        }
-    }
-
-    private fun getMaxDestination(db: SQLiteDatabase): Int {
-        val cursor = db.rawQuery(
-            "SELECT MAX(destination) FROM barcodes",
-            null
-        )
-
-        cursor.use {
-            return if (it.moveToFirst() && !it.isNull(0)) {
-                it.getInt(0)
-            } else {
-                0
+            } finally {
+                db.endTransaction()
             }
         }
     }
